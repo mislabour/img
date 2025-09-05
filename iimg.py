@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration class for all settings"""
     # Telegram Bot Token (get from @BotFather)
-    TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+    TELEGRAM_BOT_TOKEN = "7933552663:AAGp2eQVrT5pZNgKRwWde07yW-CYcxlWyHo"
     
     # Instagram credentials
     INSTAGRAM_USERNAME = "your_instagram_username"
