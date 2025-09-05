@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI Image Generator Bot with Instagram Integration
-Clean version without emojis, proper indentation
+AI Image Generator Bot with Instagram Integration - Fixed Version
+Fixes the enable_model_cpu_offload error and other issues
 """
 
 import os
@@ -53,6 +53,7 @@ try:
     from instagrapi import Client
     from instagrapi.exceptions import LoginRequired
     from PIL import Image
+    import accelerate
 except ImportError as e:
     print(f"Import error: {e}")
     print("Please make sure all required packages are installed.")
@@ -68,7 +69,7 @@ class Config:
     """Configuration class"""
     
     # Telegram bot token from @BotFather
-    TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+    TELEGRAM_BOT_TOKEN = "7933552663:AAGp2eQVrT5pZNgKRwWde07yW-CYcxlWyHo"
     
     # Instagram credentials
     INSTAGRAM_USERNAME = "your_username"
@@ -132,7 +133,7 @@ class WordManager:
         return prompt
 
 class ImageGenerator:
-    """Handles image generation using Stable Diffusion"""
+    """Handles image generation using Stable Diffusion - FIXED VERSION"""
     
     def __init__(self):
         self.pipe = None
@@ -143,32 +144,67 @@ class ImageGenerator:
         self.load_model()
     
     def load_model(self):
-        """Load Stable Diffusion model"""
+        """Load Stable Diffusion model with proper error handling"""
         try:
             print("Loading Stable Diffusion model...")
             print("This may take several minutes on first run...")
             
-            torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+            # Use appropriate dtype based on device
+            if self.device == "cuda":
+                torch_dtype = torch.float16
+            else:
+                torch_dtype = torch.float32
             
+            # Load the pipeline
             self.pipe = DiffusionPipeline.from_pretrained(
                 "runwayml/stable-diffusion-v1-5",
                 torch_dtype=torch_dtype,
                 safety_checker=None,
-                requires_safety_checker=False
+                requires_safety_checker=False,
+                use_safetensors=True
             )
             
+            # Move to device
             self.pipe = self.pipe.to(self.device)
             
+            # Enable memory optimizations - FIXED VERSION
             if hasattr(self.pipe, 'enable_attention_slicing'):
                 self.pipe.enable_attention_slicing()
+                print("Enabled attention slicing for memory optimization")
             
-            if hasattr(self.pipe, 'enable_model_cpu_offload') and self.device == "cpu":
-                self.pipe.enable_model_cpu_offload()
+            # Only enable CPU offload for CUDA devices with limited memory
+            if self.device == "cuda":
+                try:
+                    # Check available GPU memory
+                    gpu_memory = torch.cuda.get_device_properties(0).total_memory
+                    gpu_memory_gb = gpu_memory / (1024**3)
+                    print(f"GPU Memory: {gpu_memory_gb:.1f} GB")
+                    
+                    # Enable CPU offload for GPUs with less than 8GB
+                    if gpu_memory_gb < 8:
+                        print("Enabling CPU offload for limited GPU memory...")
+                        self.pipe.enable_model_cpu_offload()
+                        
+                except Exception as e:
+                    print(f"Could not enable CPU offload: {e}")
+            
+            # Enable sequential CPU offload for CPU-only devices
+            elif self.device == "cpu":
+                try:
+                    print("Enabling sequential CPU offload...")
+                    self.pipe.enable_sequential_cpu_offload()
+                except Exception as e:
+                    print(f"Could not enable sequential CPU offload: {e}")
+                    # Continue without offloading
             
             print("Model loaded successfully")
             
         except Exception as e:
             print(f"Failed to load model: {e}")
+            print("Troubleshooting tips:")
+            print("1. Make sure you have enough disk space (10GB+)")
+            print("2. Check internet connection for model download")
+            print("3. Try running with --no-cache-dir flag")
             raise
     
     def generate_image(self, prompt, seed=None):
@@ -176,22 +212,25 @@ class ImageGenerator:
         try:
             print(f"Generating image for: {prompt}")
             
+            # Set up generator with seed
             generator = None
             if seed:
                 generator = torch.Generator(device=self.device).manual_seed(seed)
             
+            # Generate image with proper memory management
             with torch.no_grad():
                 result = self.pipe(
                     prompt,
                     height=Config.IMAGE_HEIGHT,
                     width=Config.IMAGE_WIDTH,
-                    num_inference_steps=25,
+                    num_inference_steps=20,  # Reduced for faster generation
                     guidance_scale=7.5,
                     generator=generator
                 )
             
             image = result.images[0]
             
+            # Save image with timestamp and seed
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if seed:
                 filename = f"ai_art_{timestamp}_seed{seed}.png"
@@ -202,10 +241,18 @@ class ImageGenerator:
             image.save(filepath)
             
             print(f"Image saved: {filepath}")
+            
+            # Clear cache to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             return filepath
             
         except Exception as e:
             print(f"Image generation failed: {e}")
+            # Clear cache on error too
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             raise
 
 class InstagramManager:
@@ -338,6 +385,7 @@ class TelegramBot:
         try:
             await query.edit_message_text("Starting AI art generation...")
             
+            # Generate random prompt with seed
             seed = random.randint(1, 999999)
             prompt = self.word_manager.generate_prompt(seed)
             
@@ -345,9 +393,10 @@ class TelegramBot:
                 f"Generating AI art...\n\n"
                 f"Prompt: {prompt}\n"
                 f"Seed: {seed}\n\n"
-                f"This may take 1-2 minutes..."
+                f"This may take 1-3 minutes..."
             )
             
+            # Generate image
             image_path = self.image_generator.generate_image(prompt, seed)
             
             await query.edit_message_text(
@@ -357,6 +406,7 @@ class TelegramBot:
                 f"Posting to Instagram..."
             )
             
+            # Create Instagram caption
             caption = (
                 f"AI Generated Art\n\n"
                 f"Prompt: {prompt}\n"
@@ -365,9 +415,19 @@ class TelegramBot:
                 f"#ai #aiart #stablediffusion #generated #digitalart #art #creative #machinelearning"
             )
             
+            # Post to Instagram
             success = self.instagram_manager.post_image(image_path, caption)
             
             if success:
+                # Send the image to user as well
+                with open(image_path, 'rb') as photo:
+                    await query.message.reply_photo(
+                        photo=photo,
+                        caption=f"Success! Posted to @{Config.INSTAGRAM_USERNAME}\n\n"
+                               f"Prompt: {prompt}\n"
+                               f"Seed: {seed}"
+                    )
+                
                 await query.edit_message_text(
                     f"Success!\n\n"
                     f"Prompt: {prompt}\n"
@@ -401,13 +461,21 @@ class TelegramBot:
             else:
                 image_count = 0
             
+            # Check GPU memory if available
+            gpu_info = ""
+            if torch.cuda.is_available():
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                gpu_memory_used = torch.cuda.memory_allocated(0) / (1024**3)
+                gpu_info = f"\nGPU Memory: {gpu_memory_used:.1f}/{gpu_memory:.1f} GB"
+            
             status_text = (
                 f"System Status\n\n"
                 f"AI Model: {model_status}\n"
                 f"Instagram: {ig_status}\n"
                 f"Device: {self.image_generator.device.upper()}\n"
                 f"Images Generated: {image_count}\n"
-                f"Words Available: {len(self.word_manager.words)}\n\n"
+                f"Words Available: {len(self.word_manager.words)}"
+                f"{gpu_info}\n\n"
                 f"System ready for art generation!"
             )
             
@@ -431,10 +499,11 @@ class TelegramBot:
             f"Commands:\n"
             f"/start - Show main menu\n\n"
             f"Tips:\n"
-            f"- Generation takes 1-2 minutes\n"
+            f"- Generation takes 1-3 minutes\n"
             f"- Images are saved locally\n"
             f"- Each image has a unique seed\n"
-            f"- Seeds can be used to reproduce images"
+            f"- Seeds can be used to reproduce images\n"
+            f"- Bot sends you the generated image too"
         )
         
         await query.edit_message_text(help_text)
@@ -462,21 +531,4 @@ class TelegramBot:
             print("\nBot stopped by user")
 
 def main():
-    """Main function"""
-    print("AI Image Generator Bot")
-    print("=" * 40)
-    
-    try:
-        bot = TelegramBot()
-        bot.run()
-    except Exception as e:
-        print(f"Error starting bot: {e}")
-        print("\nTroubleshooting:")
-        print("1. Make sure all packages are installed")
-        print("2. Check your bot token is correct")
-        print("3. Verify Instagram credentials")
-        print("4. Ensure stable internet connection")
-        print("5. Check if CUDA is properly installed (for GPU)")
-
-if __name__ == "__main__":
-    main()
+    """Main
